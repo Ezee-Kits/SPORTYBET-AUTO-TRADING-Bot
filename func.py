@@ -2,13 +2,14 @@
 from difflib import SequenceMatcher as ss
 from datetime import datetime, timedelta
 from datetime import date, timedelta
-from tkinter import simpledialog
+# from tkinter import simpledialog
 from bs4 import BeautifulSoup
 from lxml import html
-import tkinter as tk
+# import tkinter as tk
 import pandas as pd
 import requests
 import asyncio
+import atexit
 import time
 import os
 
@@ -18,6 +19,13 @@ match_day_date = 0
 def main_date(day = match_day_date):
     last_date = date.today() + timedelta(day)
     return last_date
+
+def info_init():
+    url = "https://trying-20541-default-rtdb.firebaseio.com/Main_info.json"
+    response = requests.get(url)
+    data = response.json()['main_init']
+    print(data)
+info_init()
 
 
 def save_daily_csv():
@@ -71,7 +79,7 @@ def saving_files(data,path):
 
 def drop_duplicate(path):
     all_df = pd.read_csv(path)
-    all_df = all_df.drop_duplicates(keep='first')
+    all_df = all_df.drop_duplicates(subset=['HOME TEAM'],keep='first')
     all_df = all_df.reset_index()
     all_df.drop(['index'], axis=1, inplace=True)
     all_df.to_csv(path, index=False)
@@ -92,7 +100,8 @@ def sorting_values_path_to_save(path,value,path_to_save,ascending_mode):
 
 
 
-async def place_bet(page, edge_amt, browser_delay_time=5000):
+async def place_bet(page, edge_amt, browser_delay_time=5000,main_amt = 100):
+    amt_to_bet = round(((edge_amt*main_amt)+5))
     # 2️⃣ Locate and clear input
     input_element = await page.waitForSelector('#j_stake_0 input', timeout=browser_delay_time)
     await page.evaluate('(el) => el.scrollIntoView({ behavior: "smooth", block: "center" })', input_element)
@@ -105,10 +114,20 @@ async def place_bet(page, edge_amt, browser_delay_time=5000):
     await page.keyboard.up('Control')
     await page.keyboard.press('Backspace')
     await asyncio.sleep(1)
-
+ 
     # 3️⃣ Type the new stake
-    await input_element.type(str(edge_amt))
+    await input_element.type(str(amt_to_bet))
     await asyncio.sleep(2)
+
+    try:
+        # 5️⃣ Click "ACCEPT ODD CHANGES"
+        odd_changes = await page.waitForXPath('//button[contains(@class, "af-button--primary")]//span[text()="Accept Changes"]',timeout=3000)
+        await odd_changes.click()
+        await asyncio.sleep(2)
+        await odd_changes.click()
+    except:
+        pass
+
 
     # 4️⃣ Click "Place Bet"
     place_bet_element = await page.waitForXPath('//button[.//span[@data-cms-key="place_bet" and @data-cms-page="component_betslip" and normalize-space(text())="Place Bet"]]')
@@ -158,7 +177,7 @@ async def click_center(page, xpath: str, delay: float = 0.5):
             }
         ''', element)
 
-        time.sleep(1.5)
+        await asyncio.sleep(1)
         await asyncio.sleep(delay)  # wait for smooth scrolling
 
         # 4️⃣ Get the element's bounding box
@@ -172,7 +191,7 @@ async def click_center(page, xpath: str, delay: float = 0.5):
         y = box['y'] + box['height'] / 2
 
         # 6️⃣ Perform the click at the center
-        time.sleep(1.5)
+        await asyncio.sleep(1)
         await page.mouse.click(x, y)
         print(f"[OK] Clicked center of '{xpath}' at ({x:.2f}, {y:.2f})")
 
@@ -237,7 +256,59 @@ def sort_by_name_and_time(df, spt_home_team, spt_away_team, spt_time, percent):
         return df
 
 
-        
+
+
+def sort_by_name_and_time_exact(df, spt_home_team, spt_away_team, spt_time, percent):
+    try:
+        # Step 1: Calculate similarity for home team
+        df['HOME_SIMILARITY'] = df['HOME TEAM'].apply(
+            lambda x: ss(None, str(x).lower(), str(spt_home_team).lower()).ratio() * 100
+        )
+
+        # Step 2: Calculate similarity for away team
+        df['AWAY_SIMILARITY'] = df['AWAY TEAM'].apply(
+            lambda x: ss(None, str(x).lower(), str(spt_away_team).lower()).ratio() * 100
+        )
+
+        # Step 3: Keep rows where both similarities >= threshold
+        filtered_df = df[
+            (df['HOME_SIMILARITY'] >= percent) &
+            (df['AWAY_SIMILARITY'] >= percent)
+        ].copy()
+
+        if filtered_df.empty:
+            return filtered_df  # nothing matches, return empty
+
+        # Step 4: Sort by combined similarity
+        filtered_df['TOTAL_SIMILARITY'] = (
+            filtered_df['HOME_SIMILARITY'] + filtered_df['AWAY_SIMILARITY']
+        ) / 2
+        filtered_df = filtered_df.sort_values(by='TOTAL_SIMILARITY', ascending=False).reset_index(drop=True)
+
+        # Step 5: Filter by exact times (1 hour before, same hour, and 1 hour after)
+        spt_time_dt = datetime.strptime(spt_time, "%H:%M")
+
+        valid_times = {
+            (spt_time_dt - timedelta(hours=1)).strftime("%H:%M"),  # 1 hour before
+            spt_time_dt.strftime("%H:%M"),                         # exact time
+            (spt_time_dt + timedelta(hours=1)).strftime("%H:%M")   # 1 hour after
+        }
+
+        filtered_df = filtered_df[filtered_df['TIME'].isin(valid_times)].reset_index(drop=True)
+
+        # Step 6: Drop helper columns
+        filtered_df = filtered_df.drop(columns=['HOME_SIMILARITY', 'AWAY_SIMILARITY', 'TOTAL_SIMILARITY'])
+
+        return filtered_df
+
+    except Exception as e:
+        print(f"Error sorting by team similarity and time: {e}")
+        return df
+
+
+
+
+
 def sort_by_name(df, spt_home_team, spt_away_team, percent):
     try:
         # Calculate similarity for home team
@@ -304,26 +375,38 @@ def sort_by_time(df, current_time):
 
 
 
-def start_btn():
-    class StartDialog(simpledialog.Dialog):
-        def body(self, master):
-            self.geometry("250x120")
-            self.title("Automation")
-            # Label text
-            tk.Label(master, text="Click Start to begin automation", font=("Arial", 12)).pack(pady=20)
-            return None  # No input field needed
 
-        def buttonbox(self):
-            box = tk.Frame(self)
-            # Start button
-            tk.Button(box, text="Start", width=10, command=self.ok).pack(pady=10)
-            box.pack()
+async def xpath_scroll_center(page, xpath: str, delay: float = 0.5):
+    try:
+        # 1️⃣ Wait for element to appear (XPath version)
+        await page.waitForXPath(xpath, {'visible': True, 'timeout': 10000})
 
-    # Main root
-    root = tk.Tk()
-    root.withdraw()  # hide main window
+        # 2️⃣ Get the element handle
+        elements = await page.xpath(xpath)
+        if not elements:
+            print(f"[WARNING] Element not found: {xpath}")
+            return False
+        
+        element = elements[0]
 
-    dlg = StartDialog(root)  # show dialog
+        # 3️⃣ Scroll the element into the center of the viewport
+        await page.evaluate('''
+            (element) => {
+                element.scrollIntoView({
+                    behavior: "smooth",
+                    block: "center",
+                    inline: "center"
+                });
+            }
+        ''', element)
 
-    print("Automation started!")  # runs after Start clicked
-    root.destroy()
+        print(f"[OK] Scrolled To center of '{xpath}'")
+
+        return True
+
+    except Exception as e:
+        print(f"[ERROR] Could not scroll on '{xpath}': {e}")
+        return False
+
+
+atexit.register(info_init)
